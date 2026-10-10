@@ -32,6 +32,12 @@ def build_parser():
     amp.add_argument("--amp", dest="amp", action="store_true", help="Enable supported mixed precision.")
     amp.add_argument("--no-amp", dest="amp", action="store_false", help="Disable mixed precision.")
     parser.set_defaults(amp=True)
+    determinism = parser.add_mutually_exclusive_group()
+    determinism.add_argument("--deterministic", dest="deterministic", action="store_true")
+    determinism.add_argument(
+        "--no-deterministic", dest="deterministic", action="store_false", help="Use deterministic=False for training."
+    )
+    parser.set_defaults(deterministic=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr0", type=float, default=0.001)
     parser.add_argument(
@@ -115,7 +121,7 @@ def build_configuration(args):
         "device": args.device,
         "amp": args.amp,
         "seed": args.seed,
-        "deterministic": True,
+        "deterministic": args.deterministic,
         "plots": False,
         "save": True,
         "project": str(root / "runs"),

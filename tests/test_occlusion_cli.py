@@ -41,6 +41,7 @@ def test_cli_configuration_preserves_training_controls(monkeypatch, tmp_path):
             "--workers",
             "0",
             "--no-amp",
+            "--no-deterministic",
             "--seed",
             "17",
             "--lr0",
@@ -71,6 +72,7 @@ def test_cli_configuration_preserves_training_controls(monkeypatch, tmp_path):
     assert overrides["project"] == str(tmp_path / "runs")
     assert overrides["batch"] == 4 and overrides["workers"] == 0 and overrides["amp"] is False
     assert overrides["device"] == "0" and overrides["seed"] == 17
+    assert overrides["deterministic"] is False
     assert overrides["lr0"] == 0.0005 and overrides["optimizer"] == "SGD"
     assert overrides["patience"] == 0 and overrides["max_det"] == 700
     assert config == {
@@ -92,6 +94,7 @@ def test_baseline_defaults_and_explicit_augmentation_disable():
     overrides, config = cli.build_configuration(args)
     assert overrides["epochs"] == 100 and overrides["model"] == "yolo11n.pt"
     assert overrides["amp"] is True and config["safe_augment"] is True
+    assert overrides["deterministic"] is True
     assert config["enabled"] is False and config["cap"] == 2.0
     args = cli.build_parser().parse_args(["--amp", "--no-safe-augment", "--batch", "-1"])
     overrides, config = cli.build_configuration(args)

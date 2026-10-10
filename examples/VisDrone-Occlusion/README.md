@@ -41,6 +41,12 @@ python examples/VisDrone-Occlusion/train_visdrone.py --data examples/VisDrone-Oc
 
 如果显存不足，先减小 batch；降低分辨率时所有对照组同步修改。Windows 建议从 `--workers 0` 开始，再按本机情况增大。以上 100 轮是运行配置，不代表已确定的最优预算。当前支持单 GPU，尚未提供自动 resume。
 
+若参照原来 `epochs=200 imgsz=640 batch=4 device=0 workers=0 deterministic=False` 的设置，使用下面的一行。`--no-deterministic` 对应 `deterministic=False`，默认仍为 True；普通 `yolo detect train` 不会启用本项目的遮挡加权训练器。
+
+```powershell
+python examples/VisDrone-Occlusion/train_visdrone.py --data examples/VisDrone-Occlusion/visdrone_occ.yaml --model ultralytics/cfg/models/11/yolo11n-occ-goa.yaml --pretrained yolo11n.pt --weighted --size-weight 0.5 --occ-weight 0.5 --joint-weight 0.5 --weight-cap 2 --weight-warmup 5 --weight-ramp 10 --epochs 200 --imgsz 640 --batch 4 --device 0 --workers 0 --no-deterministic --amp --seed 42 --patience 0 --name goa_size_occ_200
+```
+
 若你希望先自行做三轮检查，将上述命令改为 `--epochs 3 --imgsz 640 --batch 2 --weight-warmup 0 --weight-ramp 3`，换一个运行名。短训练必须缩短预热，否则前三轮默认权重均为 1。
 
 ## 本版改动
