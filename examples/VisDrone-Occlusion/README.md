@@ -25,7 +25,13 @@ C:/date/VisDrone_occ/
   occlusion/val/*.json
 ```
 
-Dataset 同时读取五列框标签和 JSON 遮挡标签。支持上传示例的 `visdrone-yolo-occlusion-v1`，也支持 `metadata/{split}` 目录。加载时核对类别、框坐标和标签 SHA256（若提供）；错误对应会报错。遮挡 0/1/2 是等级编码，不是精确遮挡比例。GPU 环境可自行检查：
+Dataset 同时读取五列框标签和 JSON 遮挡标签。支持上传示例的 `visdrone-yolo-occlusion-v1`，也支持 `metadata/{split}` 目录。加载时核对类别、框坐标和标签 SHA256（若提供）；错误对应会报错。遮挡 0/1/2 是等级编码，不是精确遮挡比例。
+
+JSON 中明确标记 `occ_valid: false` 的目标（例如原始重复框的遮挡 0/1 冲突，经转换记为 `occlusion: -1`）保留为遮挡未知。检测框、类别、普通检测损失和小目标权重全部保留；仅该目标的遮挡与小目标×遮挡加权项为零，其余有效遮挡标签继续正常加权。读取器输出独立的 `occ_valid` 布尔掩码，加载日志报告未知目标和图片数量；`weight_diagnostics.jsonl` 单独记录 `gt_with_unknown_occlusion`、`matched_gt_with_unknown_occlusion`，不会把未知目标算作无遮挡。未明确标为无效的非法等级仍报错。无需修改源 JSON/TXT 或删除缓存。
+
+上述未知掩码支持当前训练入口。可选的 `import_sidecar_yolo.py` 严格导入工具仍拒绝未知标注，独立评估脚本尚未接入此掩码；直接训练无需运行它们。
+
+GPU 环境可自行检查：
 
 ```powershell
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
@@ -60,6 +66,8 @@ s = size_reference / (sqrt(input_pixel_area) + size_reference)
 o = occlusion / 2
 w = clip(1 + r(epoch) × (αs + βo + γso), 1, cap)
 ```
+
+仅对遮挡已知的目标使用上述 `o`。遮挡未知目标保持 `occlusion=-1`、`occ_valid=false`，在权重公式中屏蔽 β、γ 项，得到 `w = clip(1 + r(epoch) × αs, 1, cap)`，不删除检测目标。
 
 α 为 `--size-weight`，β 为 `--occ-weight`，γ 为 `--joint-weight`。目标越小、遮挡等级越高，权重越高；γ 项专门增加同时小且被遮挡目标的权重。`joint-weight` 默认 0 以保持旧配置兼容，上述完整方案显式设为 0.5。`size-reference` 默认 32，是模型输入图上的像素尺度。
 

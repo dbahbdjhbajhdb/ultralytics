@@ -12,6 +12,7 @@ import torch
 from ultralytics.data.augment import Compose, Format, LetterBox, RandomFlip, RandomHSV
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import img2label_paths
+from ultralytics.utils import LOGGER
 
 
 class OcclusionDataset(YOLODataset):
@@ -22,6 +23,7 @@ class OcclusionDataset(YOLODataset):
 
     def get_labels(self):
         labels = super().get_labels()
+        unknown_targets = unknown_images = 0
         for lb in labels:
             path = Path(img2label_paths([lb["im_file"]])[0])
             label_root = path.parent if path.parent.name == "labels" else path.parent.parent
@@ -35,7 +37,7 @@ class OcclusionDataset(YOLODataset):
             meta = next((p for p in candidates if p.exists()), None)
             if meta is None:
                 raise ValueError(f"Missing occlusion metadata for {path}")
-            payload = json.loads(meta.read_text())
+            payload = json.loads(meta.read_text(encoding="utf-8-sig"))
             if payload.get("label_sha256") and hashlib.sha256(path.read_bytes()).hexdigest() != payload["label_sha256"]:
                 raise ValueError(f"Label hash mismatch: {path}")
             mapping = {}
@@ -43,19 +45,39 @@ class OcclusionDataset(YOLODataset):
                 values = obj.get("yolo")
                 if values is None:
                     values = [obj["class_id"], *obj["bbox_xywh_normalized"]]
-                if not obj.get("occ_valid", True) or obj["occlusion"] not in (0, 1, 2):
-                    raise ValueError(f"Invalid occlusion metadata: {meta}")
+                valid = obj.get("occ_valid", True)
+                degree = obj.get("occlusion")
+                if not isinstance(valid, bool) or (
+                    valid
+                    and (isinstance(degree, bool) or not isinstance(degree, (int, float)) or degree not in (0, 1, 2))
+                ):
+                    raise ValueError(f"Invalid occlusion metadata: {meta}, label_row={obj.get('label_row')}")
+                # Explicitly unknown/conflicting visibility must not remove a detection target.
+                supervision = (int(degree), True) if valid else (-1, False)
                 key = tuple(np.asarray(values, dtype=np.float32).round(6))
-                if key in mapping and mapping[key] != obj["occlusion"]:
-                    raise ValueError("Conflicting metadata")
-                mapping[key] = obj["occlusion"]
+                if key in mapping and mapping[key] != supervision:
+                    raise ValueError(f"Conflicting metadata: {meta}, target={key}")
+                mapping[key] = supervision
             occ = []
+            occ_valid = []
             for cls, box in zip(lb["cls"], lb["bboxes"]):
                 key = tuple(np.r_[cls, box].astype(np.float32).round(6))
                 if key not in mapping:
                     raise ValueError(f"Label metadata mismatch: {path}")
-                occ.append(mapping[key])
+                degree, valid = mapping[key]
+                occ.append(degree)
+                occ_valid.append(valid)
             lb["occlusion"] = np.array(occ, dtype=np.float32)
+            lb["occ_valid"] = np.array(occ_valid, dtype=bool)
+            count = int((~lb["occ_valid"]).sum())
+            unknown_targets += count
+            unknown_images += int(count > 0)
+        self.occlusion_metadata_statistics = {"unknown_targets": unknown_targets, "unknown_images": unknown_images}
+        if unknown_targets:
+            LOGGER.warning(
+                f"{self.prefix}{unknown_targets} targets in {unknown_images} images have unknown/conflicting occlusion; "
+                "detection and size weighting remain enabled, only occlusion/joint weighting is skipped."
+            )
         return labels
 
     def build_transforms(self, hyp=None):
@@ -75,13 +97,16 @@ class OcclusionDataset(YOLODataset):
     def __getitem__(self, index):
         batch = super().__getitem__(index)
         batch["occlusion"] = torch.tensor(self.labels[index]["occlusion"])
-        if len(batch["occlusion"]) != len(batch["cls"]):
+        batch["occ_valid"] = torch.tensor(self.labels[index]["occ_valid"], dtype=torch.bool)
+        if len(batch["occlusion"]) != len(batch["cls"]) or len(batch["occ_valid"]) != len(batch["cls"]):
             raise ValueError("Transformed label alignment failed")
         return batch
 
     @staticmethod
     def collate_fn(batch):
         occlusion = torch.cat([item.pop("occlusion") for item in batch])
+        occ_valid = torch.cat([item.pop("occ_valid") for item in batch])
         result = YOLODataset.collate_fn(batch)
         result["occlusion"] = occlusion
+        result["occ_valid"] = occ_valid
         return result

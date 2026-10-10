@@ -30,6 +30,8 @@ class WeightedDetectionLoss(v8DetectionLoss):
         self.statistics = {
             "gt_by_occlusion": [0, 0, 0],
             "matched_gt_by_occlusion": [0, 0, 0],
+            "gt_with_unknown_occlusion": 0,
+            "matched_gt_with_unknown_occlusion": 0,
             "positive_anchors": 0,
             "weight_sum": 0.0,
             "weight_min": None,
@@ -43,12 +45,30 @@ class WeightedDetectionLoss(v8DetectionLoss):
 
     def positive_weights(self, batch, gt_bboxes, assigned_gt, fg_mask):
         fg_mask = fg_mask.bool()
-        occ = torch.zeros(gt_bboxes.shape[:2], device=self.device)
+        occ = torch.full(gt_bboxes.shape[:2], -1.0, device=self.device)
+        occ_valid = torch.zeros(gt_bboxes.shape[:2], dtype=torch.bool, device=self.device)
         batch_idx = batch["batch_idx"].to(self.device)
         occlusion = batch["occlusion"].to(self.device)
+        known_degrees = (occlusion == 0) | (occlusion == 1) | (occlusion == 2)
+        validity = batch.get("occ_valid")
+        if validity is None:
+            # Backward compatibility for batches/checkpoints created before the validity mask.
+            validity = known_degrees
+        else:
+            validity = validity.to(self.device)
+            if validity.dtype != torch.bool:
+                raise ValueError("Occlusion validity mask must have boolean dtype")
+        if occlusion.ndim != 1 or batch_idx.ndim != 1 or validity.ndim != 1:
+            raise ValueError("Occlusion values, validity and batch indices must be one-dimensional")
+        if len(occlusion) != len(batch_idx) or len(validity) != len(occlusion):
+            raise ValueError("Occlusion validity/target alignment failed")
+        if (validity & ~known_degrees).any():
+            raise ValueError("Known occlusion targets must use numeric levels 0, 1 or 2")
         for j in range(gt_bboxes.shape[0]):
-            values = occlusion[batch_idx == j]
+            selected = batch_idx == j
+            values = occlusion[selected]
             occ[j, : len(values)] = values
+            occ_valid[j, : len(values)] = validity[selected]
         dimensions = (gt_bboxes[..., 2:] - gt_bboxes[..., :2]).float().clamp_min(0)
         area = dimensions.prod(-1)
         alpha = float(self.config["size_weight"])
@@ -61,7 +81,9 @@ class WeightedDetectionLoss(v8DetectionLoss):
         if min(alpha, beta, gamma) < 0 or reference <= 0 or cap < 1:
             raise ValueError("Weights must be nonnegative, reference size positive and cap at least 1")
         smallness = reference / (area.sqrt() + reference)
-        occlusion_level = occ / 2
+        # Unknown visibility contributes neither an occlusion bonus nor a joint bonus.
+        # Keep the sentinel separate from level 0 in the supervision and statistics.
+        occlusion_level = torch.where(occ_valid, occ / 2, torch.zeros_like(occ))
         difficulty = alpha * smallness + beta * occlusion_level + gamma * smallness * occlusion_level
         gt_weights = (1 + self.progress * difficulty).clamp(1, cap)
         anchor_weights = (
@@ -76,9 +98,12 @@ class WeightedDetectionLoss(v8DetectionLoss):
             if fg_mask[j].any():
                 matched_gt[j, assigned_gt[j, fg_mask[j]].unique()] = True
         for degree in range(3):
-            group = valid_gt & (occ == degree)
+            group = valid_gt & occ_valid & (occ == degree)
             self.statistics["gt_by_occlusion"][degree] += int(group.sum())
             self.statistics["matched_gt_by_occlusion"][degree] += int((group & matched_gt).sum())
+        unknown_gt = valid_gt & ~occ_valid
+        self.statistics["gt_with_unknown_occlusion"] += int(unknown_gt.sum())
+        self.statistics["matched_gt_with_unknown_occlusion"] += int((unknown_gt & matched_gt).sum())
         positive = anchor_weights[fg_mask]
         if positive.numel():
             self.statistics["positive_anchors"] += positive.numel()
