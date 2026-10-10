@@ -4,6 +4,8 @@
 
 新监督损失已接入项目原来的 `train_visdrone.py`：增加 `--occlusion-supervision` 即使用 `OcclusionSupervisedTrainer`、训练期辅助头和 `OcclusionSupervisionLoss`。该模式使用标准模型，不与原来的 GOA 模型或 `--weighted` 同时启用。独立入口 `train_occlusion_supervised.py` 仍保留，使用同一套监督损失。
 
+新增的 `--occlusion-fusion` 模式将遮挡编码通过 P3 残差融合送入检测头，训练和推理都保留编码与融合模块。其结构、从头训练命令及三个对照组见 [README_fusion.md](README_fusion.md)。下文描述的是原来的 `--occlusion-supervision` 模式；在融合模式中 `--aux-weight 0` 只关闭遮挡 CE，融合模块仍由检测损失训练，不等同于普通 YOLO 基线。
+
 ## 先更新代码
 
 你下载的 `cc2d8ee9` ZIP，以及之前只替换 `occlusion.py`、`occlusion_loss.py` 的修复，都不包含新的辅助任务和已接入监督损失的原训练入口。请先安装本方案对应的修改；文件下载和替换说明以交付时提供的固定提交为准。保留你自己建立的 `visdrone2019-occ.yaml` 和原数据。

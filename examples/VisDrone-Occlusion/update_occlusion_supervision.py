@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""Install direct occlusion supervision into an existing ZIP, without training."""
+"""Install occlusion supervision and P3 encoding fusion into an existing ZIP, without training."""
 
 import argparse
 import hashlib
@@ -13,12 +13,13 @@ from pathlib import Path
 
 FILES = {
     "ultralytics/data/occlusion.py": "bdfb9ae0e422b461cbae18caab17f8b51ac034d5d2088a68d641fbe5fb97be5e",
-    "ultralytics/nn/modules/occlusion_aux.py": "30a576e149ca1c529dd3161583a9e1fbf1904c2dcbf1895c97cc78b9fa0b38f4",
-    "ultralytics/utils/occlusion_supervision_loss.py": "528397b361d5db9e51e56a414d6350f8a524b8176c28ca645c0e77520c420fa3",
-    "ultralytics/models/yolo/detect/occlusion_supervision.py": "7d96e13000206e72054af77b6f1c0071ba1ce7bd10b9a8e1377d10bc6d48035a",
-    "examples/VisDrone-Occlusion/train_visdrone.py": "02f79946661449066bfb0a687f3fbd828c370a83b593bf993cc75eca2f6b271c",
-    "examples/VisDrone-Occlusion/train_occlusion_supervised.py": "8d74d2adbe082e8dfdb98512ef9a45329fe6e1c484a324e387c0071a1119cc05",
-    "examples/VisDrone-Occlusion/README_supervision.md": "77e398ca1dd7b689ee062eadca3ddc018e4fdf146830d5768b68ddf3a588906d",
+    "ultralytics/nn/modules/occlusion_aux.py": "1ba816c341960fdf1fce576feec175b60a3c17d4da9953cc6f49c02e063c131d",
+    "ultralytics/utils/occlusion_supervision_loss.py": "eca4cb4f16a0e72a302133c5c38bdb8312f31c91e7299972342a9d62e0ac760f",
+    "ultralytics/models/yolo/detect/occlusion_supervision.py": "5aa3ef8c19cf78262b0b915e409862c3ea3aba780cf06cc8f5a9f43955562781",
+    "examples/VisDrone-Occlusion/train_visdrone.py": "51c5a861b7577ac171f589d1e00b1a6fbb2b7b85c53df138004ca9eb101ecc6c",
+    "examples/VisDrone-Occlusion/train_occlusion_supervised.py": "402a2592474c81f67cf51b1700fe96c06ce7433a0cf4445351fca88b7c75caee",
+    "examples/VisDrone-Occlusion/README_supervision.md": "31efee9e1f1a41e6064e98610b692076f1ed9ff8431ddde0535720f91e661980",
+    "examples/VisDrone-Occlusion/README_fusion.md": "f9bcd7f22299691b586357d96ff1cff4423ebb0a2923f44d10cc525ba876f77b",
 }
 
 REQUIRED = (

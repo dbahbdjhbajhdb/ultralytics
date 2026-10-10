@@ -1,15 +1,17 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""Training-only GT-region occlusion supervision attached to an unchanged Detect head."""
+"""GT-region occlusion supervision, with optional P3 encoding fused into detection."""
 
 from __future__ import annotations
 
 import copy
+import math
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .conv import Conv
 from .head import Detect
 
 
@@ -82,14 +84,17 @@ class OcclusionAuxDetect(Detect):
         return {"detect": raw, "occlusion_features": features}
 
     def _validate_regions(self, features, boxes, batch_idx):
-        if not isinstance(features, (tuple, list)) or len(features) != self.nl:
-            raise ValueError("Occlusion ROI pooling needs all three detection feature maps")
+        # Older auxiliary-only checkpoints do not contain roi_channels. Their
+        # ROI descriptors continue to use all three original neck features.
+        roi_channels = getattr(self, "roi_channels", self.input_channels)
+        if not isinstance(features, (tuple, list)) or len(features) != len(roi_channels):
+            raise ValueError("Occlusion ROI feature count does not match the classifier's input levels")
         if any(not isinstance(feature, torch.Tensor) or feature.ndim != 4 for feature in features):
             raise ValueError("Occlusion feature maps must be BCHW tensors")
         batch_size, device = features[0].shape[0], features[0].device
         if batch_size < 1:
             raise ValueError("Occlusion feature batches must not be empty")
-        for feature, channels in zip(features, self.input_channels):
+        for feature, channels in zip(features, roi_channels):
             if (
                 not feature.is_floating_point()
                 or feature.device != device
@@ -115,7 +120,7 @@ class OcclusionAuxDetect(Detect):
         return boxes, indices.long()
 
     def pool_regions(self, features, boxes, batch_idx):
-        """Return one differentiable multi-scale descriptor per GT, in the input GT order.
+        """Return one differentiable region descriptor per GT, in the input GT order.
 
         A 3x3 grid samples uniformly spaced bin centers in each normalized xywh
         region. Regions are grouped by image so a feature map is never repeated
@@ -123,7 +128,8 @@ class OcclusionAuxDetect(Detect):
         """
         boxes, batch_idx = self._validate_regions(features, boxes, batch_idx)
         if not len(boxes):
-            return features[0].new_empty((0, sum(self.input_channels)), dtype=torch.float32)
+            roi_channels = getattr(self, "roi_channels", self.input_channels)
+            return features[0].new_empty((0, sum(roi_channels)), dtype=torch.float32)
         fractions = (torch.arange(self.roi_size, device=boxes.device, dtype=torch.float32) + 0.5) / self.roi_size
         offset_y, offset_x = torch.meshgrid(fractions - 0.5, fractions - 0.5, indexing="ij")
         offsets = torch.stack((offset_x, offset_y), dim=-1)
@@ -156,3 +162,81 @@ class OcclusionAuxDetect(Detect):
         """Predict three occlusion classes for supplied GT regions during training."""
         descriptors = self.pool_regions(features, boxes, batch_idx)
         return self.aux_classifier(descriptors.to(dtype=self.aux_classifier[0].weight.dtype))
+
+
+class OcclusionFusionDetect(OcclusionAuxDetect):
+    """Condition P3 detection features on a dense, region-supervised occlusion encoding.
+
+    The encoder and residual fusion run during training and inference. Only the
+    GT-region classifier is training-only: no labels or boxes are needed for
+    prediction. As with ``OcclusionAuxDetect``, the caller must construct this
+    replacement under ``torch.random.fork_rng(devices=[])`` so initialization
+    does not change the baseline model's random-number stream.
+
+    Let F be the original P3 map and E its compact encoding. Detection receives
+    F + alpha * phi(concat(F, E)), while the auxiliary loss classifies pooled E.
+    Both detection and occlusion gradients therefore train the same encoder.
+    """
+
+    def __init__(
+        self,
+        source_head: Detect,
+        hidden: int = 64,
+        roi_size: int = 3,
+        encoding_channels: int = 32,
+        fusion_init: float = 0.01,
+    ):
+        if isinstance(encoding_channels, bool) or not isinstance(encoding_channels, int) or encoding_channels < 1:
+            raise ValueError("Occlusion encoding width must be a positive integer")
+        if (
+            isinstance(fusion_init, bool)
+            or not isinstance(fusion_init, (int, float))
+            or not math.isfinite(fusion_init)
+            or not 0 <= fusion_init <= 1
+        ):
+            raise ValueError("Initial fusion scale must be finite and within [0, 1]")
+        if tuple(source_head.stride.tolist()) != (8.0, 16.0, 32.0):
+            raise ValueError("P3 occlusion fusion requires Detect inputs with strides 8, 16 and 32")
+        super().__init__(source_head=source_head, hidden=hidden, roi_size=roi_size)
+
+        p3_channels = self.input_channels[0]
+        self.encoding_channels = encoding_channels
+        self.roi_channels = (encoding_channels,)
+        self.fusion_init = float(fusion_init)
+        self.occlusion_encoder = nn.Sequential(
+            Conv(p3_channels, encoding_channels, 1), Conv(encoding_channels, encoding_channels, 3)
+        )
+        # The compact intermediate projection avoids a full (C + E) -> C
+        # pointwise convolution at every P3 location. Its final layer is linear
+        # so the residual can add or subtract feature responses.
+        self.occlusion_fusion = nn.Sequential(
+            Conv(p3_channels + encoding_channels, encoding_channels, 1),
+            nn.Conv2d(encoding_channels, p3_channels, 1, bias=False),
+        )
+        self.aux_classifier = nn.Sequential(nn.Linear(encoding_channels, hidden), nn.SiLU(), nn.Linear(hidden, 3))
+        source_parameter = next(source_head.parameters())
+        self.fusion_scale = nn.Parameter(source_parameter.new_tensor(self.fusion_init))
+
+        # Model-wide initialization already ran before the Detect replacement.
+        # Match its BN settings rather than leave new Conv layers at defaults.
+        source_bn = getattr(source_head.cv2[0][0], "bn", None)
+        for component in (self.occlusion_encoder, self.occlusion_fusion, self.aux_classifier):
+            component.to(device=source_parameter.device, dtype=source_parameter.dtype)
+            component.train(source_head.training)
+            if source_bn is not None:
+                for module in component.modules():
+                    if isinstance(module, nn.BatchNorm2d):
+                        module.eps = source_bn.eps
+                        module.momentum = source_bn.momentum
+        self.np = sum(parameter.numel() for parameter in self.parameters())
+
+    def forward(self, x: list[torch.Tensor]):
+        """Fuse P3 in every mode and expose its encoding only for training losses."""
+        features = list(x)  # Detect replaces list entries with its raw predictions.
+        encoding = self.occlusion_encoder(features[0])
+        residual = self.occlusion_fusion(torch.cat((features[0], encoding), dim=1))
+        features[0] = features[0] + self.fusion_scale * residual
+        raw = Detect.forward(self, features)
+        if self.training:
+            return {"detect": raw, "occlusion_features": (encoding,)}
+        return raw

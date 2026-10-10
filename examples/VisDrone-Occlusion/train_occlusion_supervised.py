@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""Train a standard detector with optional direct, GT-region occlusion supervision.
+"""Train a detector with GT-region occlusion supervision and optional P3 feature fusion.
 
 This guarded entry point does not import torch or start training on import.
 """
@@ -35,12 +35,15 @@ def build_parser():
     parser.add_argument("--max-det", type=int, default=1000)
     parser.add_argument("--name", default=None)
     parser.add_argument(
-        "--aux-weight", type=float, default=0.1, help="Auxiliary CE coefficient; 0 gives a matched baseline."
+        "--aux-weight", type=float, default=0.1, help="Auxiliary CE coefficient; 0 disables CE but retains fusion."
     )
     parser.add_argument("--aux-warmup", type=int, default=5)
     parser.add_argument("--aux-ramp", type=int, default=10)
     parser.add_argument("--aux-hidden", type=int, default=64)
     parser.add_argument("--aux-roi-size", type=int, default=3)
+    parser.add_argument("--occlusion-fusion", action="store_true", help="Enable supervised P3 encoding and residual fusion.")
+    parser.add_argument("--encoding-channels", type=int, default=32)
+    parser.add_argument("--fusion-init", type=float, default=0.01)
     parser.add_argument("--threads", type=int, default=2)
     amp = parser.add_mutually_exclusive_group()
     amp.add_argument("--amp", dest="amp", action="store_true")
@@ -66,12 +69,14 @@ def build_configuration(args):
         raise ValueError("--batch must be a positive integer; AutoBatch does not profile the GT-region auxiliary loss")
     if min(args.workers, args.seed, args.patience, args.aux_warmup, args.aux_ramp) < 0:
         raise ValueError("Workers, seed, patience and auxiliary schedule must be nonnegative")
-    if min(args.threads, args.max_det, args.aux_hidden, args.aux_roi_size) < 1:
-        raise ValueError("Threads, max-det, auxiliary width and ROI size must be positive")
+    if min(args.threads, args.max_det, args.aux_hidden, args.aux_roi_size, args.encoding_channels) < 1:
+        raise ValueError("Threads, max-det, auxiliary width, ROI size and encoding width must be positive")
     if not math.isfinite(args.lr0) or args.lr0 <= 0:
         raise ValueError("--lr0 must be finite and positive")
     if not math.isfinite(args.aux_weight) or args.aux_weight < 0:
         raise ValueError("--aux-weight must be finite and nonnegative")
+    if not math.isfinite(args.fusion_init) or not 0 <= args.fusion_init <= 1:
+        raise ValueError("--fusion-init must be finite and within [0, 1]")
     root = Path(os.environ.get("OCC_EXPERIMENT_ROOT", str(REPOSITORY_ROOT))).expanduser().resolve()
     auxiliary_config = {
         "coefficient": args.aux_weight,
@@ -80,6 +85,13 @@ def build_configuration(args):
         "warmup_epochs": args.aux_warmup,
         "ramp_epochs": args.aux_ramp,
     }
+    if args.occlusion_fusion:
+        auxiliary_config.update(
+            feature_fusion=True, encoding_channels=args.encoding_channels, fusion_init=args.fusion_init
+        )
+    default_name = "occ_supervised_scratch_200" if args.aux_weight else "occ_supervised_baseline_200"
+    if args.occlusion_fusion:
+        default_name = "occ_fusion_scratch_200" if args.aux_weight else "occ_fusion_no_aux_200"
     overrides = {
         "model": args.model,
         "data": args.data,
@@ -96,7 +108,7 @@ def build_configuration(args):
         "patience": args.patience,
         "max_det": args.max_det,
         "project": str(root / "runs"),
-        "name": args.name or ("occ_supervised_scratch_200" if args.aux_weight else "occ_supervised_baseline_200"),
+        "name": args.name or default_name,
         "exist_ok": False,
         "pretrained": args.pretrained or False,
         "plots": False,

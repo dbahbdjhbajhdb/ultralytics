@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""Unchanged detection loss plus direct, training-only GT occlusion classification."""
+"""Unchanged detection loss plus GT occlusion CE on neck features or a fused encoding."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class OcclusionSupervisionLoss(v8DetectionLoss):
         super().__init__(model, tal_topk)
         self.head = model.model[-1]
         if not isinstance(self.head, OcclusionAuxDetect):
-            raise TypeError("Direct occlusion supervision requires OcclusionAuxDetect")
+            raise TypeError("Occlusion supervision requires OcclusionAuxDetect or its fusion subclass")
         self.config = getattr(model, "occlusion_aux_config", {}).copy()
         self.coefficient = float(self.config.get("coefficient", 0.1))
         if not math.isfinite(self.coefficient) or self.coefficient < 0:
@@ -115,7 +115,7 @@ class OcclusionSupervisionLoss(v8DetectionLoss):
     def __call__(self, preds, batch):
         if isinstance(preds, dict):
             if "detect" not in preds or "occlusion_features" not in preds:
-                raise ValueError("Auxiliary training predictions require detection outputs and original neck features")
+                raise ValueError("Auxiliary training predictions require detection outputs and occlusion features")
             features = preds["occlusion_features"]
             raw_ce = self._auxiliary_loss(features, batch)
             detection_loss, detection_items = super().__call__(preds["detect"], batch)

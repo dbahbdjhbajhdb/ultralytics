@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-"""Train VisDrone baselines, weighted detection or direct occlusion supervision.
+"""Train VisDrone baselines, weighted detection, occlusion supervision or P3 fusion.
 
 Importing this module only defines the command-line interface. Training and heavy
 imports happen under ``main`` so that Windows DataLoader workers can import it.
@@ -55,13 +55,20 @@ def build_parser():
     loss_mode.add_argument(
         "--occlusion-supervision", action="store_true", help="Enable direct GT-region occlusion classification loss."
     )
+    loss_mode.add_argument(
+        "--occlusion-fusion",
+        action="store_true",
+        help="Fuse a supervised P3 occlusion encoding into detection features during training and inference.",
+    )
     parser.add_argument(
-        "--aux-weight", type=float, default=0.1, help="Auxiliary CE coefficient; 0 gives its paired baseline."
+        "--aux-weight", type=float, default=0.1, help="Auxiliary CE coefficient; 0 disables CE but retains fusion."
     )
     parser.add_argument("--aux-warmup", type=int, default=5)
     parser.add_argument("--aux-ramp", type=int, default=10)
     parser.add_argument("--aux-hidden", type=int, default=64)
     parser.add_argument("--aux-roi-size", type=int, default=3)
+    parser.add_argument("--encoding-channels", type=int, default=32, help="P3 occlusion encoding width in fusion mode.")
+    parser.add_argument("--fusion-init", type=float, default=0.01, help="Initial learnable residual scale in fusion mode.")
     parser.add_argument("--size-weight", type=float, default=0.5)
     parser.add_argument("--occ-weight", type=float, default=0.5)
     parser.add_argument(
@@ -93,7 +100,8 @@ def build_parser():
 
 def build_configuration(args):
     """Validate CLI values and configure the selected loss without importing torch."""
-    model = args.model or ("yolo11n.yaml" if args.occlusion_supervision else "yolo11n.pt")
+    supervision = args.occlusion_supervision or args.occlusion_fusion
+    model = args.model or ("yolo11n.yaml" if supervision else "yolo11n.pt")
     if args.pretrained and Path(model).suffix.lower() not in {".yaml", ".yml"}:
         raise ValueError("--pretrained initializes model YAMLs; a .pt --model already selects its own checkpoint")
     if args.epochs < 1 or args.imgsz < 32:
@@ -112,7 +120,7 @@ def build_configuration(args):
         raise ValueError("--size-reference must be finite and positive")
     if not math.isfinite(args.weight_cap) or args.weight_cap < 1:
         raise ValueError("--weight-cap must be finite and at least 1")
-    if args.occlusion_supervision:
+    if supervision:
         if args.weighted:
             raise ValueError("Direct occlusion supervision and weighted detection are separate experiments")
         if "goa" in Path(model).stem.lower():
@@ -123,6 +131,10 @@ def build_configuration(args):
             raise ValueError("--aux-weight must be finite and nonnegative")
         if min(args.aux_warmup, args.aux_ramp) < 0 or min(args.aux_hidden, args.aux_roi_size) < 1:
             raise ValueError("Auxiliary schedule must be nonnegative; hidden width and ROI size must be positive")
+        if args.encoding_channels < 1:
+            raise ValueError("--encoding-channels must be positive")
+        if not math.isfinite(args.fusion_init) or not 0 <= args.fusion_init <= 1:
+            raise ValueError("--fusion-init must be finite and within [0, 1]")
 
     root = Path(os.environ.get("OCC_EXPERIMENT_ROOT", str(REPOSITORY_ROOT))).expanduser().resolve()
     occlusion_config = {
@@ -136,7 +148,7 @@ def build_configuration(args):
         "ramp_epochs": args.weight_ramp,
         "safe_augment": args.safe_augment,
     }
-    if args.occlusion_supervision:
+    if supervision:
         occlusion_config = {
             "coefficient": args.aux_weight,
             "hidden": args.aux_hidden,
@@ -144,9 +156,15 @@ def build_configuration(args):
             "warmup_epochs": args.aux_warmup,
             "ramp_epochs": args.aux_ramp,
         }
+        if args.occlusion_fusion:
+            occlusion_config.update(
+                feature_fusion=True, encoding_channels=args.encoding_channels, fusion_init=args.fusion_init
+            )
     default_name = "visdrone_weighted" if args.weighted else "visdrone_baseline"
     if args.occlusion_supervision:
         default_name = "visdrone_occlusion_supervised" if args.aux_weight else "visdrone_occlusion_baseline"
+    if args.occlusion_fusion:
+        default_name = "visdrone_occlusion_fusion" if args.aux_weight else "visdrone_fusion_no_aux"
     overrides = {
         "model": model,
         "data": args.data,
@@ -157,20 +175,20 @@ def build_configuration(args):
         "device": args.device,
         "amp": args.amp,
         "seed": args.seed,
-        "deterministic": args.deterministic if args.deterministic is not None else not args.occlusion_supervision,
+        "deterministic": args.deterministic if args.deterministic is not None else not supervision,
         "plots": False,
         "save": True,
         "project": str(root / "runs"),
         "name": args.name or default_name,
         "exist_ok": False,
-        "pretrained": args.pretrained or (not args.occlusion_supervision),
+        "pretrained": args.pretrained or (not supervision),
         "optimizer": args.optimizer,
         "lr0": args.lr0,
         "patience": args.patience,
         "max_det": args.max_det,
         "val": True,
     }
-    if args.occlusion_supervision:
+    if supervision:
         overrides["close_mosaic"] = 0
     return overrides, occlusion_config
 
@@ -193,8 +211,9 @@ def main(argv=None):
     import torch
 
     torch.set_num_threads(args.threads)
-    config_key = "auxiliary_config" if args.occlusion_supervision else "occlusion_config"
-    if args.occlusion_supervision:
+    supervision = args.occlusion_supervision or args.occlusion_fusion
+    config_key = "auxiliary_config" if supervision else "occlusion_config"
+    if supervision:
         from ultralytics.models.yolo.detect.occlusion_supervision import OcclusionSupervisedTrainer
 
         trainer = OcclusionSupervisedTrainer(
@@ -205,7 +224,7 @@ def main(argv=None):
 
         trainer = OcclusionTrainer(overrides=overrides, occlusion_config=occlusion_config)
     trainer.save_dir.mkdir(parents=True, exist_ok=True)
-    if not args.occlusion_supervision:
+    if not supervision:
         (trainer.save_dir / "occlusion_config.json").write_text(
             json.dumps(occlusion_config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
