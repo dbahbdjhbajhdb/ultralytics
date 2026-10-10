@@ -151,3 +151,65 @@ def test_checkpoint_model_rejects_ignored_pretrained_override():
     args = cli.build_parser().parse_args(["--model", "yolo11n.pt", "--pretrained", "other.pt"])
     with pytest.raises(ValueError, match="initializes model YAMLs"):
         cli.build_configuration(args)
+
+
+def test_existing_entry_enables_scratch_auxiliary_supervision_and_paired_baseline():
+    cli = load_cli()
+    parser = cli.build_parser()
+    supervised, config = cli.build_configuration(parser.parse_args(["--occlusion-supervision"]))
+    baseline, baseline_config = cli.build_configuration(
+        parser.parse_args(["--occlusion-supervision", "--aux-weight", "0"])
+    )
+    assert supervised["model"] == "yolo11n.yaml" and supervised["pretrained"] is False
+    assert supervised["deterministic"] is False and supervised["close_mosaic"] == 0
+    assert config == {"coefficient": 0.1, "hidden": 64, "roi_size": 3, "warmup_epochs": 5, "ramp_epochs": 10}
+    assert baseline_config == dict(config, coefficient=0.0)
+    assert {key: value for key, value in supervised.items() if key != "name"} == {
+        key: value for key, value in baseline.items() if key != "name"
+    }
+
+
+def test_existing_entry_does_not_mix_weighting_with_supervision():
+    cli = load_cli()
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--occlusion-supervision", "--weighted"])
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--aux-weight", "nan"),
+        ("--aux-weight", "-1"),
+        ("--aux-hidden", "0"),
+        ("--aux-roi-size", "0"),
+        ("--aux-warmup", "-1"),
+        ("--aux-ramp", "-1"),
+        ("--batch", "-1"),
+        ("--model", "yolo11n-occ-goa.yaml"),
+    ],
+)
+def test_existing_entry_rejects_incompatible_auxiliary_configuration(flag, value):
+    cli = load_cli()
+    with pytest.raises(ValueError):
+        cli.build_configuration(cli.build_parser().parse_args(["--occlusion-supervision", flag, value]))
+
+
+def test_existing_entry_preserves_explicit_supervision_pretraining_and_schedule():
+    cli = load_cli()
+    args = cli.build_parser().parse_args(
+        [
+            "--occlusion-supervision",
+            "--pretrained",
+            "yolo11n.pt",
+            "--aux-weight",
+            "0.05",
+            "--aux-warmup",
+            "2",
+            "--aux-ramp",
+            "4",
+            "--deterministic",
+        ]
+    )
+    overrides, config = cli.build_configuration(args)
+    assert overrides["pretrained"] == "yolo11n.pt" and overrides["deterministic"] is True
+    assert config["coefficient"] == 0.05 and config["warmup_epochs"] == 2 and config["ramp_epochs"] == 4

@@ -76,7 +76,7 @@ class OcclusionDataset(YOLODataset):
         if unknown_targets:
             LOGGER.warning(
                 f"{self.prefix}{unknown_targets} targets in {unknown_images} images have unknown/conflicting occlusion; "
-                "detection and size weighting remain enabled, only occlusion/joint weighting is skipped."
+                "their detection targets are retained; occlusion-specific weighting or supervision is skipped."
             )
         return labels
 

@@ -12,13 +12,15 @@ from datetime import datetime
 from pathlib import Path
 
 FILES = {
-    "ultralytics/data/occlusion.py": "e09eb667e5643545891f8d7ca74b608f35989dc598c679229bede9495b9e4190",
+    "ultralytics/data/occlusion.py": "bdfb9ae0e422b461cbae18caab17f8b51ac034d5d2088a68d641fbe5fb97be5e",
     "ultralytics/nn/modules/occlusion_aux.py": "30a576e149ca1c529dd3161583a9e1fbf1904c2dcbf1895c97cc78b9fa0b38f4",
     "ultralytics/utils/occlusion_supervision_loss.py": "528397b361d5db9e51e56a414d6350f8a524b8176c28ca645c0e77520c420fa3",
     "ultralytics/models/yolo/detect/occlusion_supervision.py": "7d96e13000206e72054af77b6f1c0071ba1ce7bd10b9a8e1377d10bc6d48035a",
+    "examples/VisDrone-Occlusion/train_visdrone.py": "02f79946661449066bfb0a687f3fbd828c370a83b593bf993cc75eca2f6b271c",
     "examples/VisDrone-Occlusion/train_occlusion_supervised.py": "8d74d2adbe082e8dfdb98512ef9a45329fe6e1c484a324e387c0071a1119cc05",
-    "examples/VisDrone-Occlusion/README_supervision.md": "a89e5d121b03e54e282f2ae3d48c27302e50deac6fefc1167f6a74c564cb6ef2",
+    "examples/VisDrone-Occlusion/README_supervision.md": "77e398ca1dd7b689ee062eadca3ddc018e4fdf146830d5768b68ddf3a588906d",
 }
+
 REQUIRED = (
     "pyproject.toml",
     "ultralytics/nn/tasks.py",

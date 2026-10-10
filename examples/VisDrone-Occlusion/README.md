@@ -1,6 +1,6 @@
 # VisDrone：遮挡加权损失 + 分组正交注意力
 
-当前新增的直接遮挡辅助监督方案使用标准 YOLO11n，运行与更新说明见 [README_supervision.md](README_supervision.md)。下文保留之前的 GOA 与损失加权实验说明。
+直接遮挡辅助监督已接入 `train_visdrone.py --occlusion-supervision`，使用标准 YOLO11n。运行与旧 ZIP 更新说明见 [README_supervision.md](README_supervision.md)。下文保留之前的 GOA 与损失加权实验说明。
 
 本版按用户要求只修改代码，训练和效果验证由用户执行。新增注意力与联合加权尚未运行训练、前向、评估或 pytest；只做源码、语法、格式和模型配置的静态检查。普通 YOLO11 模型仍可作为对照，NMS 保持原实现。
 

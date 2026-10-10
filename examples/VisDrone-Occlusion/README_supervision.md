@@ -2,15 +2,15 @@
 
 本入口在标准 YOLO11n 上增加训练期的遮挡分类任务。每个遮挡标签有效的 GT 都可以提供辅助监督，不要求这个 GT 先被检测分配器匹配到正样本。普通检测损失保持原有形式，模型配置使用 `yolo11n.yaml`。
 
-本方案暂时放下原先的 GOA 模型和小目标、遮挡损失加权。不要将下面的新入口替换成旧的 `train_visdrone.py`，也不要沿用 `yolo11n-occ-goa.yaml`。
+新监督损失已接入项目原来的 `train_visdrone.py`：增加 `--occlusion-supervision` 即使用 `OcclusionSupervisedTrainer`、训练期辅助头和 `OcclusionSupervisionLoss`。该模式使用标准模型，不与原来的 GOA 模型或 `--weighted` 同时启用。独立入口 `train_occlusion_supervised.py` 仍保留，使用同一套监督损失。
 
 ## 先更新代码
 
-你下载的 `cc2d8ee9` ZIP，以及之前只替换 `occlusion.py`、`occlusion_loss.py` 的修复，都不包含这个新入口和新的辅助任务。请先安装本方案对应的新增代码；文件下载和替换说明以交付时提供的固定提交为准。保留你自己建立的 `visdrone2019-occ.yaml` 和原数据。
+你下载的 `cc2d8ee9` ZIP，以及之前只替换 `occlusion.py`、`occlusion_loss.py` 的修复，都不包含新的辅助任务和已接入监督损失的原训练入口。请先安装本方案对应的修改；文件下载和替换说明以交付时提供的固定提交为准。保留你自己建立的 `visdrone2019-occ.yaml` 和原数据。
 
 这些改动本轮只进行静态检查，没有运行模型、训练、验证或 pytest。下列命令由你在自己的 GPU 环境执行，效果需要实验确认。
 
-提供 `update_occlusion_supervision.py` 用于旧 ZIP：下载交付的固定提交版本，在外层解压目录或内层项目目录运行 `python update_occlusion_supervision.py --root . --ref <交付提交的完整 SHA>`。脚本自动定位一层内的项目，先下载并核对所有文件的 SHA256 和 Python 语法，再备份并写入。更新包含新版遮挡读取器，不需要重新转换数据；自己的数据 YAML 和已有训练结果不会被覆盖。外层目录完成更新后，训练命令仍需在打印的 `ROOT` 内层目录执行。
+提供 `update_occlusion_supervision.py` 用于旧 ZIP：下载交付的固定提交版本，在外层解压目录或内层项目目录运行 `python update_occlusion_supervision.py --root . --ref <交付提交的完整 SHA>`。脚本自动定位一层内的项目，先下载并核对所有文件的 SHA256 和 Python 语法，再备份并写入。更新包含原训练入口和新版遮挡读取器，不需要重新转换数据；自己的数据 YAML 和已有训练结果不会被覆盖。外层目录完成更新后，训练命令仍需在打印的 `ROOT` 内层目录执行。
 
 ## 数据保持原目录
 
@@ -47,13 +47,13 @@ cd "C:\Users\123\Downloads\ultralytics-cc2d8ee923fee079909c9e3a104267af221cf06d\
 辅助监督组，从随机初始化训练：
 
 ```powershell
-python examples/VisDrone-Occlusion/train_occlusion_supervised.py --model ultralytics/cfg/models/11/yolo11n.yaml --data ultralytics/cfg/datasets/visdrone2019-occ.yaml --epochs 200 --imgsz 640 --batch 4 --device 0 --workers 0 --aux-weight 0.1 --aux-warmup 5 --aux-ramp 10 --aux-hidden 64 --aux-roi-size 3 --amp --seed 42 --optimizer AdamW --lr0 0.001 --patience 0 --name occ_supervised_scratch_200
+python examples/VisDrone-Occlusion/train_visdrone.py --occlusion-supervision --model yolo11n.yaml --data ultralytics/cfg/datasets/visdrone2019-occ.yaml --epochs 200 --imgsz 640 --batch 4 --device 0 --workers 0 --aux-weight 0.1 --aux-warmup 5 --aux-ramp 10 --aux-hidden 64 --aux-roi-size 3 --amp --seed 42 --optimizer AdamW --lr0 0.001 --patience 0 --name occ_supervised_scratch_200
 ```
 
-配对基线也使用同一个新入口，只将辅助损失系数设为 0：
+配对基线使用同一入口并保留 `--occlusion-supervision`，只将辅助损失系数设为 0：
 
 ```powershell
-python examples/VisDrone-Occlusion/train_occlusion_supervised.py --model ultralytics/cfg/models/11/yolo11n.yaml --data ultralytics/cfg/datasets/visdrone2019-occ.yaml --epochs 200 --imgsz 640 --batch 4 --device 0 --workers 0 --aux-weight 0 --aux-warmup 5 --aux-ramp 10 --aux-hidden 64 --aux-roi-size 3 --amp --seed 42 --optimizer AdamW --lr0 0.001 --patience 0 --name occ_supervised_baseline_200
+python examples/VisDrone-Occlusion/train_visdrone.py --occlusion-supervision --model yolo11n.yaml --data ultralytics/cfg/datasets/visdrone2019-occ.yaml --epochs 200 --imgsz 640 --batch 4 --device 0 --workers 0 --aux-weight 0 --aux-warmup 5 --aux-ramp 10 --aux-hidden 64 --aux-roi-size 3 --amp --seed 42 --optimizer AdamW --lr0 0.001 --patience 0 --name occ_supervised_baseline_200
 ```
 
 两组保持同样的数据、模型配置、初始化来源、种子、增强、优化器、轮数和输入分辨率。不要将辅助组的结果直接与使用不同增强或预训练设置的旧 GOA 结果比较。
