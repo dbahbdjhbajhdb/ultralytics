@@ -22,6 +22,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", default=str(root / "data/processed/visdrone_pilot/dataset.yaml"))
     parser.add_argument("--model", default="yolo11n.pt", help="A pretrained checkpoint or model YAML.")
+    parser.add_argument("--pretrained", default=None, help="Checkpoint to initialize a model YAML, e.g. yolo11n.pt.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu", help="Use 0 for the first CUDA GPU, or cpu.")
@@ -44,6 +45,12 @@ def build_parser():
     parser.add_argument("--weighted", action="store_true", help="Enable the size/occlusion loss prototype.")
     parser.add_argument("--size-weight", type=float, default=0.5)
     parser.add_argument("--occ-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--joint-weight", type=float, default=0.0, help="Additional weight for small AND occluded targets."
+    )
+    parser.add_argument(
+        "--size-reference", type=float, default=32.0, help="Reference target size in model-input pixels."
+    )
     parser.add_argument("--weight-cap", type=float, default=2.0)
     parser.add_argument("--weight-warmup", type=int, default=5, help="Initial epochs with baseline weights.")
     parser.add_argument("--weight-ramp", type=int, default=10, help="Epochs used to ramp up weighting.")
@@ -67,6 +74,8 @@ def build_parser():
 
 def build_configuration(args):
     """Validate CLI values and produce explicit trainer and weighting settings."""
+    if args.pretrained and Path(args.model).suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("--pretrained initializes model YAMLs; a .pt --model already selects its own checkpoint")
     if args.epochs < 1 or args.imgsz < 32:
         raise ValueError("--epochs must be positive and --imgsz must be at least 32")
     if args.batch < -1 or args.batch == 0:
@@ -77,8 +86,10 @@ def build_configuration(args):
         raise ValueError("--threads and --max-det must be positive")
     if not math.isfinite(args.lr0) or args.lr0 <= 0:
         raise ValueError("--lr0 must be finite and positive")
-    if any(not math.isfinite(value) or value < 0 for value in (args.size_weight, args.occ_weight)):
+    if any(not math.isfinite(value) or value < 0 for value in (args.size_weight, args.occ_weight, args.joint_weight)):
         raise ValueError("Loss weights must be finite and nonnegative")
+    if not math.isfinite(args.size_reference) or args.size_reference <= 0:
+        raise ValueError("--size-reference must be finite and positive")
     if not math.isfinite(args.weight_cap) or args.weight_cap < 1:
         raise ValueError("--weight-cap must be finite and at least 1")
 
@@ -87,6 +98,8 @@ def build_configuration(args):
         "enabled": args.weighted,
         "size_weight": args.size_weight,
         "occ_weight": args.occ_weight,
+        "joint_weight": args.joint_weight,
+        "size_reference": args.size_reference,
         "cap": args.weight_cap,
         "warmup_epochs": args.weight_warmup,
         "ramp_epochs": args.weight_ramp,
@@ -108,7 +121,7 @@ def build_configuration(args):
         "project": str(root / "runs"),
         "name": args.name or ("visdrone_weighted" if args.weighted else "visdrone_baseline"),
         "exist_ok": False,
-        "pretrained": True,
+        "pretrained": args.pretrained or True,
         "optimizer": args.optimizer,
         "lr0": args.lr0,
         "patience": args.patience,

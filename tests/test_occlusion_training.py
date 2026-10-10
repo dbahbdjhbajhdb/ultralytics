@@ -51,6 +51,15 @@ def test_size_and_occlusion_each_influence_weight():
     assert weights[0, 2] > weights[0, 0] > weights[0, 1] >= 1
 
 
+def test_joint_bonus_requires_occlusion_and_is_stronger_for_smaller_targets():
+    loss = make_loss()
+    loss.config.update(size_weight=0.0, occ_weight=0.0, joint_weight=0.5)
+    gt = torch.tensor([[[0.0, 0.0, 8.0, 8.0], [0.0, 0.0, 64.0, 64.0], [0.0, 0.0, 8.0, 8.0]]])
+    batch = {"batch_idx": torch.tensor([0, 0, 0]), "occlusion": torch.tensor([2.0, 2.0, 0.0])}
+    weights = loss.positive_weights(batch, gt, torch.tensor([[0, 1, 2]]), torch.ones(1, 3, dtype=torch.bool))
+    assert weights[0, 0] > weights[0, 1] > weights[0, 2] == 1
+
+
 def test_flip_preserves_occlusion_and_instance_order(tmp_path):
     for kind in ["images", "labels", "metadata"]:
         (tmp_path / kind / "train").mkdir(parents=True)

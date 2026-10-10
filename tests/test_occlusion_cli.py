@@ -77,6 +77,8 @@ def test_cli_configuration_preserves_training_controls(monkeypatch, tmp_path):
         "enabled": True,
         "size_weight": 0.25,
         "occ_weight": 0.75,
+        "joint_weight": 0.0,
+        "size_reference": 32.0,
         "cap": 2.0,
         "warmup_epochs": 3,
         "ramp_epochs": 6,
@@ -101,6 +103,9 @@ def test_baseline_defaults_and_explicit_augmentation_disable():
     [
         ("--size-weight", "nan"),
         ("--occ-weight", "-1"),
+        ("--joint-weight", "nan"),
+        ("--joint-weight", "-1"),
+        ("--size-reference", "0"),
         ("--weight-cap", "0.5"),
         ("--weight-warmup", "-1"),
         ("--weight-ramp", "-1"),
@@ -114,4 +119,32 @@ def test_invalid_training_configuration_is_rejected(flag, value):
     cli = load_cli()
     args = cli.build_parser().parse_args([flag, value])
     with pytest.raises(ValueError):
+        cli.build_configuration(args)
+
+
+def test_attention_yaml_keeps_explicit_pretrained_and_joint_weight():
+    cli = load_cli()
+    args = cli.build_parser().parse_args(
+        [
+            "--model",
+            "ultralytics/cfg/models/11/yolo11n-occ-goa.yaml",
+            "--pretrained",
+            "yolo11n.pt",
+            "--weighted",
+            "--joint-weight",
+            "0.5",
+            "--size-reference",
+            "48",
+        ]
+    )
+    overrides, config = cli.build_configuration(args)
+    assert overrides["model"].endswith("yolo11n-occ-goa.yaml")
+    assert overrides["pretrained"] == "yolo11n.pt"
+    assert config["joint_weight"] == 0.5 and config["size_reference"] == 48.0
+
+
+def test_checkpoint_model_rejects_ignored_pretrained_override():
+    cli = load_cli()
+    args = cli.build_parser().parse_args(["--model", "yolo11n.pt", "--pretrained", "other.pt"])
+    with pytest.raises(ValueError, match="initializes model YAMLs"):
         cli.build_configuration(args)

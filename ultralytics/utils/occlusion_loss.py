@@ -20,8 +20,10 @@ class WeightedDetectionLoss(v8DetectionLoss):
         self.config = getattr(model, "occlusion_config", {}).copy()
         self.config.setdefault("size_weight", 0.5)
         self.config.setdefault("occ_weight", 0.5)
+        self.config.setdefault("joint_weight", 0.0)
+        self.config.setdefault("size_reference", 32.0)
         self.config.setdefault("cap", 2.0)
-        self.progress = float(self.config.get("progress", 1.0))
+        self.set_progress(self.config.get("progress", 1.0))
         self.reset_statistics()
 
     def reset_statistics(self):
@@ -42,17 +44,26 @@ class WeightedDetectionLoss(v8DetectionLoss):
     def positive_weights(self, batch, gt_bboxes, assigned_gt, fg_mask):
         fg_mask = fg_mask.bool()
         occ = torch.zeros(gt_bboxes.shape[:2], device=self.device)
+        batch_idx = batch["batch_idx"].to(self.device)
+        occlusion = batch["occlusion"].to(self.device)
         for j in range(gt_bboxes.shape[0]):
-            selected = batch["batch_idx"].to(self.device) == j
-            values = batch["occlusion"].to(self.device)[selected]
+            values = occlusion[batch_idx == j]
             occ[j, : len(values)] = values
-        area = (gt_bboxes[..., 2] - gt_bboxes[..., 0]) * (gt_bboxes[..., 3] - gt_bboxes[..., 1])
+        dimensions = (gt_bboxes[..., 2:] - gt_bboxes[..., :2]).float().clamp_min(0)
+        area = dimensions.prod(-1)
         alpha = float(self.config["size_weight"])
         beta = float(self.config["occ_weight"])
+        gamma = float(self.config["joint_weight"])
+        reference = float(self.config["size_reference"])
         cap = float(self.config["cap"])
-        if not all(math.isfinite(v) for v in (alpha, beta, cap)) or min(alpha, beta) < 0 or cap < 1:
-            raise ValueError("Weight coefficients must be finite and nonnegative; cap must be at least 1")
-        gt_weights = (1 + self.progress * (alpha * 32 / (area.clamp_min(0).sqrt() + 32) + beta * occ / 2)).clamp(1, cap)
+        if not all(math.isfinite(v) for v in (alpha, beta, gamma, reference, cap)):
+            raise ValueError("Weight coefficients, reference size and cap must be finite")
+        if min(alpha, beta, gamma) < 0 or reference <= 0 or cap < 1:
+            raise ValueError("Weights must be nonnegative, reference size positive and cap at least 1")
+        smallness = reference / (area.sqrt() + reference)
+        occlusion_level = occ / 2
+        difficulty = alpha * smallness + beta * occlusion_level + gamma * smallness * occlusion_level
+        gt_weights = (1 + self.progress * difficulty).clamp(1, cap)
         anchor_weights = (
             gt_weights.gather(1, assigned_gt.clamp_min(0))
             if gt_weights.shape[1]

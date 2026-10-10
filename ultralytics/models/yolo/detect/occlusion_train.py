@@ -34,6 +34,8 @@ class OcclusionTrainer(DetectionTrainer):
             "enabled": False,
             "size_weight": 0.5,
             "occ_weight": 0.5,
+            "joint_weight": 0.0,
+            "size_reference": 32.0,
             "cap": 2.0,
             "warmup_epochs": 5,
             "ramp_epochs": 10,
@@ -44,10 +46,12 @@ class OcclusionTrainer(DetectionTrainer):
             if unknown:
                 raise ValueError(f"Unknown occlusion options: {sorted(unknown)}")
             self.occlusion_config.update(occlusion_config)
-        for key in ("size_weight", "occ_weight", "cap"):
+        for key in ("size_weight", "occ_weight", "joint_weight", "cap", "size_reference"):
             value = float(self.occlusion_config[key])
             if not math.isfinite(value) or value < (1 if key == "cap" else 0):
                 raise ValueError(f"Invalid occlusion option: {key}")
+            if key == "size_reference" and value == 0:
+                raise ValueError("size_reference must be positive")
         for key in ("warmup_epochs", "ramp_epochs"):
             value = self.occlusion_config[key]
             if not isinstance(value, int) or value < 0:
@@ -100,6 +104,11 @@ class OcclusionTrainer(DetectionTrainer):
             image_size=self.args.imgsz,
             seed=self.args.seed,
             max_det=self.args.max_det,
+            model=self.args.model,
+            pretrained=self.args.pretrained,
+            orthogonal_attention_layers=[
+                module.i for module in unwrap_model(self.model).model if type(module).__name__ == "C3k2GOA"
+            ],
         )
         (self.save_dir / "occlusion_config.json").write_text(json.dumps(payload, indent=2))
 

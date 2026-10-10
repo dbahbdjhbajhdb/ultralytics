@@ -89,6 +89,7 @@ from .head import (
     YOLOESegment,
     v10Detect,
 )
+from .orthogonal_attention import C3k2GOA, GroupedOrthogonalAttention
 from .transformer import (
     AIFI,
     MLP,
@@ -130,6 +131,8 @@ __all__ = (
     "C3",
     "C2f",
     "C3k2",
+    "C3k2GOA",
+    "GroupedOrthogonalAttention",
     "SCDown",
     "C2fPSA",
     "C2PSA",
