@@ -1,9 +1,12 @@
-import os, sys
+import os
+import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ.setdefault("YOLO_CONFIG_DIR", "/workspace/ultralytics-config")
+repository_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repository_root))
+os.environ.setdefault("YOLO_CONFIG_DIR", str(repository_root / "runs/yolo_config"))
 import torch
+
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import DEFAULT_CFG
 from ultralytics.utils.loss import v8DetectionLoss
@@ -22,13 +25,11 @@ batch = {
     "occlusion": torch.tensor([0.0, 2.0, 1.0]),
 }
 preds = model(batch["img"])
-os.environ["SIZE_WEIGHT"] = "0"
-os.environ["OCC_WEIGHT"] = "0"
+model.occlusion_config = {"size_weight": 0.0, "occ_weight": 0.0, "cap": 2.0}
 a, _ = v8DetectionLoss(model)(preds, batch)
 b, _ = WeightedDetectionLoss(model)(preds, batch)
 assert torch.allclose(a, b, atol=1e-6), (a, b)
-os.environ["SIZE_WEIGHT"] = "1"
-os.environ["OCC_WEIGHT"] = "1"
+model.occlusion_config = {"size_weight": 0.5, "occ_weight": 0.5, "cap": 2.0}
 c, _ = WeightedDetectionLoss(model)(preds, batch)
 assert torch.isfinite(c).all()
 c.sum().backward()
@@ -41,5 +42,5 @@ w = loss.positive_weights(
     torch.tensor([[0, 1]]),
     torch.tensor([[True, True]]),
 )
-assert w[0, 0] > w[0, 1] and torch.allclose(w.mean(), torch.tensor(1.0))
-print("PASS: zero-weight baseline equivalence, finite backward gradients, hard-target ordering and normalization")
+assert w[0, 0] > w[0, 1] and (w >= 1).all() and (w <= 2).all()
+print("PASS: zero-weight baseline equivalence, finite backward gradients, hard-target ordering and bounded weights")

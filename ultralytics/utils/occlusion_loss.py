@@ -2,14 +2,42 @@
 
 """Experimental size- and occlusion-weighted detection loss."""
 
-import os
+from __future__ import annotations
+
+import math
+
 import torch
+
 from ultralytics.utils.loss import v8DetectionLoss
 from ultralytics.utils.tal import make_anchors
 
 
 class WeightedDetectionLoss(v8DetectionLoss):
     """Bounded GT-derived positive weighting, not a learned dynamic controller."""
+
+    def __init__(self, model, tal_topk=10):
+        super().__init__(model, tal_topk)
+        self.config = getattr(model, "occlusion_config", {}).copy()
+        self.config.setdefault("size_weight", 0.5)
+        self.config.setdefault("occ_weight", 0.5)
+        self.config.setdefault("cap", 2.0)
+        self.progress = float(self.config.get("progress", 1.0))
+        self.reset_statistics()
+
+    def reset_statistics(self):
+        self.statistics = {
+            "gt_by_occlusion": [0, 0, 0],
+            "matched_gt_by_occlusion": [0, 0, 0],
+            "positive_anchors": 0,
+            "weight_sum": 0.0,
+            "weight_min": None,
+            "weight_max": None,
+        }
+
+    def set_progress(self, progress):
+        self.progress = float(progress)
+        if not math.isfinite(self.progress) or not 0 <= self.progress <= 1:
+            raise ValueError("Weight schedule progress must lie in [0, 1]")
 
     def positive_weights(self, batch, gt_bboxes, assigned_gt, fg_mask):
         fg_mask = fg_mask.bool()
@@ -19,16 +47,38 @@ class WeightedDetectionLoss(v8DetectionLoss):
             values = batch["occlusion"].to(self.device)[selected]
             occ[j, : len(values)] = values
         area = (gt_bboxes[..., 2] - gt_bboxes[..., 0]) * (gt_bboxes[..., 3] - gt_bboxes[..., 1])
-        alpha = float(os.environ.get("SIZE_WEIGHT", "1.0"))
-        beta = float(os.environ.get("OCC_WEIGHT", "1.0"))
-        gt_weights = (1 + alpha * 32 / (area.clamp_min(0).sqrt() + 32) + beta * occ / 2).clamp(1, 3)
+        alpha = float(self.config["size_weight"])
+        beta = float(self.config["occ_weight"])
+        cap = float(self.config["cap"])
+        if not all(math.isfinite(v) for v in (alpha, beta, cap)) or min(alpha, beta) < 0 or cap < 1:
+            raise ValueError("Weight coefficients must be finite and nonnegative; cap must be at least 1")
+        gt_weights = (1 + self.progress * (alpha * 32 / (area.clamp_min(0).sqrt() + 32) + beta * occ / 2)).clamp(1, cap)
         anchor_weights = (
             gt_weights.gather(1, assigned_gt.clamp_min(0))
             if gt_weights.shape[1]
             else torch.ones_like(assigned_gt, dtype=gt_bboxes.dtype)
         )
-        if fg_mask.any():
-            anchor_weights = anchor_weights / anchor_weights[fg_mask].mean().clamp_min(1e-8)
+        # Keep the original loss denominator: a batch of equally hard samples must not cancel its own weights.
+        valid_gt = gt_bboxes.sum(-1) > 0
+        matched_gt = torch.zeros_like(valid_gt)
+        for j in range(gt_bboxes.shape[0]):
+            if fg_mask[j].any():
+                matched_gt[j, assigned_gt[j, fg_mask[j]].unique()] = True
+        for degree in range(3):
+            group = valid_gt & (occ == degree)
+            self.statistics["gt_by_occlusion"][degree] += int(group.sum())
+            self.statistics["matched_gt_by_occlusion"][degree] += int((group & matched_gt).sum())
+        positive = anchor_weights[fg_mask]
+        if positive.numel():
+            self.statistics["positive_anchors"] += positive.numel()
+            self.statistics["weight_sum"] += float(positive.sum())
+            old_min, old_max = self.statistics["weight_min"], self.statistics["weight_max"]
+            self.statistics["weight_min"] = (
+                min(float(positive.min()), old_min) if old_min is not None else float(positive.min())
+            )
+            self.statistics["weight_max"] = (
+                max(float(positive.max()), old_max) if old_max is not None else float(positive.max())
+            )
         return torch.where(fg_mask, anchor_weights, torch.ones_like(anchor_weights))
 
     def __call__(self, preds, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:

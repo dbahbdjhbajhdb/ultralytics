@@ -3,12 +3,14 @@
 import importlib.util
 import json
 from pathlib import Path
-import torch
+
 import pytest
+import torch
 from PIL import Image
+
+from ultralytics.cfg import get_cfg
 from ultralytics.data.occlusion import OcclusionDataset
 from ultralytics.nn.tasks import DetectionModel
-from ultralytics.cfg import get_cfg
 from ultralytics.utils.loss import v8DetectionLoss
 from ultralytics.utils.occlusion_loss import WeightedDetectionLoss
 
@@ -70,13 +72,11 @@ def test_weight_zero_matches_baseline_and_backward(monkeypatch, empty):
         for key in ["batch_idx", "cls", "bboxes", "occlusion"]:
             batch[key] = batch[key][:0]
     preds = model(batch["img"])
-    monkeypatch.setenv("SIZE_WEIGHT", "0")
-    monkeypatch.setenv("OCC_WEIGHT", "0")
+    model.occlusion_config = {"size_weight": 0.0, "occ_weight": 0.0, "cap": 2.0}
     original, _ = v8DetectionLoss(model)(preds, batch)
     weighted, _ = WeightedDetectionLoss(model)(preds, batch)
     assert torch.allclose(original, weighted, atol=1e-6)
-    monkeypatch.setenv("SIZE_WEIGHT", "1")
-    monkeypatch.setenv("OCC_WEIGHT", "1")
+    model.occlusion_config = {"size_weight": 0.5, "occ_weight": 0.5, "cap": 2.0}
     loss, _ = WeightedDetectionLoss(model)(preds, batch)
     assert torch.isfinite(loss).all()
     loss.sum().backward()
@@ -154,15 +154,15 @@ def test_nms_trace_and_temperature_fit():
     keep, trace = module.greedy_trace(boxes, scores, classes, 0.5)
     assert keep.tolist() == [0, 2, 3] and trace[0]["removed"] == 1 and trace[0]["suppressor"] == 0
     samples = [
-        dict(
-            boxes=boxes,
-            scores=scores,
-            classes=classes,
-            keep=keep,
-            eligible=torch.ones(3, dtype=torch.bool),
-            gt=boxes[[0, 2]],
-            gcls=torch.tensor([0, 0]),
-        )
+        {
+            "boxes": boxes,
+            "scores": scores,
+            "classes": classes,
+            "keep": keep,
+            "eligible": torch.ones(3, dtype=torch.bool),
+            "gt": boxes[[0, 2]],
+            "gcls": torch.tensor([0, 0]),
+        }
     ]
     result = module.fit_temperature(samples, 0.5)
     assert result["status"] == "fitted" and result["positives"] == 2 and 0.05 <= result["temperature"] <= 20

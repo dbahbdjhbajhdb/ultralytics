@@ -1,93 +1,126 @@
-# VisDrone：遮挡元数据、加权损失与置信度校准实验
+# VisDrone：小目标与遮挡感知训练实验
 
-这是可运行的实验原型，不是已验证的性能改进。新增模块采用自定义 trainer 接口接入，普通 `yolo train` 的行为不变。所有转换都保留输入文件，输出标准五列 YOLO 标签与逐实例 JSON 元数据。
+当前主线是**按目标大小和遮挡等级渐进加权训练，再单独检验置信度校准**。各组保留相同的原始 NMS，便于比较训练带来的变化。这是可运行的实验原型，尚未证明性能提升；普通 `yolo train` 不受影响。
 
-## 支持的数据格式
+## 数据与目录
 
-1. 原始 VisDrone：`images/*.jpg` 与 `annotations/*.txt`，原始标注至少 8 列，最后两列为 truncation、occlusion。
-2. 扩展 YOLO：显式指定 `yolo-occ`（`class cx cy w h occ`）或 `yolo-trunc-occ`（`class cx cy w h trunc occ`）。不自动猜测列顺序。
-3. 五列 YOLO + JSON：支持 `visdrone-yolo-occlusion-v1`，包含 `class_id`、`bbox_xywh_normalized`、`occlusion`、`occ_valid` 和一基 `label_row`。JSON 放在 `metadata/{split}/`、`occlusion/{split}/` 或同名标签旁；也支持平铺的 `images/`、`labels/`、`occlusion/`。平铺训练目录用 `--split train`，平铺验证目录用 `--split val`；无需改名或移动原始目录。导入时校验标签 SHA256（若有）、目标行数、框坐标和图像尺寸。上传的示例属于此格式。
-
-准备后的目录：
+你的源目录应保持以下结构，**不要把 occlusion 改名为 labels**：
 
 ```text
-VisDrone_occ_staged/
+C:/date/VisDrone_occ/
+  images/{train,val}/              # 图片
+  labels/{train,val}/              # 标准五列 YOLO .txt
+  occlusion/{train,val}/           # 同名 JSON，逐目标遮挡等级
+```
+
+上传的 JSON 属于 `visdrone-yolo-occlusion-v1`：`label_row` 为一基行号，`class_id` 与 `bbox_xywh_normalized` 对应标签行，`occlusion` 为 0/1/2。它们是有序等级，不是精确遮挡面积比例。完整导入时还会检查行数、坐标、图像尺寸和标签 SHA256（若提供）。单个 JSON 合格不代表本机所有文件已通过校验。
+
+另外支持原始 VisDrone 8 列标注，以及显式指定列顺序的六列 `yolo-occ`、七列 `yolo-trunc-occ`；不自动猜测额外列。普通五列标签自身不能恢复丢失的遮挡信息。
+
+## Windows 从数据检查到试训
+
+以下命令在本仓库根目录、已激活的 Python 环境中执行。先取得实验分支并安装本仓库：
+
+```powershell
+git fetch origin
+git switch feat/visdrone-occlusion-training
+git pull --ff-only
+python -m pip install -e .
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0)); print(torch.ones(1, device='cuda'))"
+```
+
+CUDA 12.9 的版本号本身不能确认环境可用，上面的实际 CUDA 运算是检查依据。本云环境只有 CPU，无法访问你的 C 盘，也未验证本机 GPU。
+
+保留源文件，导入到新目录；再将原验证集切成开发验证、校准和内部留出三部分：
+
+```powershell
+python examples/VisDrone-Occlusion/import_sidecar_yolo.py --source "C:/date/VisDrone_occ" --output "C:/date/VisDrone_occ_staged"
+python examples/VisDrone-Occlusion/split_validation.py --source "C:/date/VisDrone_occ_staged" --output "C:/date/VisDrone_occ_split" --seed 42
+```
+
+导入成功会生成 `import_report.json` 和 `dataset.yaml`。切分输出必须是新目录，保留训练集；默认将原验证集按图随机分为约 20% 开发验证、40% 校准、40% 内部留出。正式实验要检查相邻视频帧/同源序列的泄漏；该工具尚未按序列分组。内部留出结果不能称为官方测试服务器结果。
+
+```text
+VisDrone_occ_split/
   dataset.yaml
   images/{train,val,cal,test}/
-  labels/{train,val,cal,test}/       # 每行只保留标准五列
-  metadata/{train,val,cal,test}/    # 同名 JSON
+  labels/{train,val,cal,test}/
+  metadata/{train,val,cal,test}/    # 遮挡 JSON，已同步导入
+  split_manifest.json
 ```
 
-Windows 图片使用复制，Linux 使用符号链接。源数据必须保留；没有遮挡标签的普通 YOLO 数据不能凭空恢复 occlusion。ignore 区域若此前丢失也无法恢复。
+Windows 复制图片，Linux 建符号链接。五列标签和 JSON 始终一起使用。
 
-## 准备数据
+先跑相同设置的两组三轮训练，检查本机全链路。加权组显式缩短预热，确保这三轮实际启用权重：
 
-已有五列标签与 JSON（按实际路径替换，下例可在 Windows 上执行）：
-
-```bash
-python examples/VisDrone-Occlusion/import_sidecar_yolo.py --source "C:/date/VisDrone_occ" --output "C:/date/VisDrone_occ_staged"
+```powershell
+python examples/VisDrone-Occlusion/train_visdrone.py --data "C:/date/VisDrone_occ_split/dataset.yaml" --model yolo11n.pt --device 0 --epochs 3 --imgsz 640 --batch 2 --workers 0 --amp --seed 42 --name smoke_baseline
+python examples/VisDrone-Occlusion/train_visdrone.py --data "C:/date/VisDrone_occ_split/dataset.yaml" --model yolo11n.pt --device 0 --epochs 3 --imgsz 640 --batch 2 --workers 0 --amp --seed 42 --weighted --weight-warmup 0 --weight-ramp 3 --name smoke_weighted
 ```
 
-六列扩展标签：
+首次运行会下载 `yolo11n.pt`。确认 `runs/smoke_weighted/weights/{best,last}.pt` 正常保存，并查看 `weight_diagnostics.jsonl` 中的 `progress` 和 `mean_positive_weight`。加权模块只接入这套自定义训练入口，直接使用普通 `yolo train` 不会启用它。
 
-```bash
-python examples/VisDrone-Occlusion/import_extended_yolo.py --source /data/VisDrone_occ --output /data/VisDrone_occ_staged --label-format yolo-occ
+## 正式训练与消融
+
+试训通过后，可先用 960 输入、batch 4、100 轮做正式基线与加权对照。显存不足时减小 batch，所有对照组同步设置；640/960/1280 分辨率应另做消融。显卡与显存未知，下列参数是起点：
+
+```powershell
+python examples/VisDrone-Occlusion/train_visdrone.py --data "C:/date/VisDrone_occ_split/dataset.yaml" --model yolo11n.pt --device 0 --epochs 100 --imgsz 960 --batch 4 --workers 4 --amp --seed 42 --name baseline_s42
+python examples/VisDrone-Occlusion/train_visdrone.py --data "C:/date/VisDrone_occ_split/dataset.yaml" --model yolo11n.pt --device 0 --epochs 100 --imgsz 960 --batch 4 --workers 4 --amp --seed 42 --weighted --size-weight 0.5 --occ-weight 0.5 --weight-cap 2 --weight-warmup 5 --weight-ramp 10 --name size_occ_s42
 ```
 
-原始标注分别转换官方 train/val 到同一输出目录：
+Windows 多进程入口有 `main` 保护；若遇 DataLoader 问题，先设 `--workers 0`。CPU 用 `--device cpu --no-amp`。当前支持单 GPU；尚未支持实验配置在 DDP 中传播，也未提供自动 resume。默认 AdamW、lr0=0.001、patience=50，具体值记录于运行文件；可用 `--patience 0` 关闭早停以执行固定轮数。
 
-```bash
-python examples/VisDrone-Occlusion/prepare_visdrone.py --source /data/VisDrone2019-DET-train --output /data/VisDrone_occ_staged --split train
-python examples/VisDrone-Occlusion/prepare_visdrone.py --source /data/VisDrone2019-DET-val --output /data/VisDrone_occ_staged --split val
+第一阶段固定模型、初始化、种子、分辨率、增强、训练预算和 NMS，比较四组：
+
+| 组别 | 训练参数 |
+|---|---|
+| baseline | 不加 `--weighted` |
+| size-only | `--weighted --size-weight 0.5 --occ-weight 0` |
+| occ-only | `--weighted --size-weight 0 --occ-weight 0.5` |
+| size+occ | `--weighted --size-weight 0.5 --occ-weight 0.5` |
+
+各组至少复现多个种子（如 42、43、44），参数只在开发验证集选择。上述 100 轮用于建立起点，不保证充分收敛。
+
+## 遮挡信息怎样参与训练
+
+`OcclusionDataset` 同时加载五列框标签和同名 JSON，通过类别与框坐标核对逐目标遮挡等级；batch 中增加 `occlusion` 张量。`WeightedDetectionLoss` 使用 TaskAlignedAssigner 返回的 GT 索引，把 GT 权重传递给它匹配的正样本 anchor：
+
+```text
+w = clip(1 + r(epoch) × [α × 32/(sqrt(area)+32) + β × occ/2], 1, cap)
 ```
 
-正式实验要区分模型选择、校准和最终评估。该工具将原始验证集分为开发验证 20%、校准 40%、内部留出 40%，保持训练集；输出必须是新目录：
+`area` 是缩放后模型输入上的目标像素面积；默认 α=β=0.5、cap=2。默认前 5 轮 r=0，再用 10 轮逐步增至 1。更小的框、较高的遮挡等级得到更高权重。权重用于正类别 BCE、框回归与 DFL，背景类别 BCE 保持原权重；保留原损失分母，不按 batch 权重均值重新归一化，避免一批都是难例时加权被抵消。零系数已验证与原损失一致。
 
-```bash
-python examples/VisDrone-Occlusion/split_validation.py --source /data/VisDrone_occ_staged --output /data/VisDrone_occ_split
+这是依赖样本属性和训练进度的显式规则，尚未实现学习式权重控制器。没有获得正样本匹配的 GT 仍无法直接受益，因此日志同时统计各遮挡等级的 GT 和已匹配 GT 数量。
+
+两组默认均使用 letterbox、HSV 和翻转增强，保持遮挡标签与框行的对应；暂未接入会裁剪/混合目标、改变可见性的 Mosaic、裁剪和 MixUp。`--no-safe-augment` 切换为仅 letterbox。通用 `args.yaml` 的部分增强参数仍显示框架默认值，应以 `occlusion_config.json` 记录的真实 transforms 为准。
+
+每次训练保存 `args.yaml`、`run_parameters.json`、`occlusion_config.json`；加权组额外保存逐轮 `weight_diagnostics.jsonl`。默认输出在仓库 `runs/<name>/`，可通过环境变量 `OCC_EXPERIMENT_ROOT` 改变输出根目录。已有同名运行不会被覆盖，以日志中的实际目录为准。
+
+## 独立校准与评估
+
+先选定 checkpoint，再在 `cal` 拟合，在内部 `test` 评估。示例是 CPU 诊断入口，大数据集可能较慢：
+
+```powershell
+python examples/VisDrone-Occlusion/evaluate_occlusion.py --weights runs/size_occ_s42/weights/best.pt --data "C:/date/VisDrone_occ_split" --eval-split test --imgsz 960 --calibration platt --output runs/size_occ_s42/calibration_test
 ```
 
-此内部留出集不是 VisDrone 官方测试服务器结果。若存在视频相邻帧/来源相关性，应在正式实验前按来源分组切分；当前工具按图像随机切分。
+分别设置 `--calibration none`、`temperature`、`platt` 并使用不同输出目录做对照。Platt 为 `sigmoid(a × logit(p) + b)`，a>0；温度为原有标量控制。只用校准集 NMS 后候选与 GT 匹配产生的 TP/FP 拟合，推理分数不读取真实遮挡标签。跨校准与评估集合存在同名或相同图片内容时拒绝运行；无正例或无负例时标记 `not_fitted_degenerate_labels` 并保留原始分数。
 
-## 训练及消融
+输出 `report.json`、`calibration.json`、`candidate_cache.pt` 和 `suppression_traces.json`。报告包含遮挡 0/1/2 分层、原图面积小于 32² 的小目标组、precision/recall、ECE/Brier。NMS 和匹配排序始终使用原始分数。全局单调校准不改善候选排序，也不能修复定位或恢复被 NMS 删除的框；它改变固定置信度阈值下的取舍，不能改善相同召回率下的误检数量。**校准不保证误检减少**，还需比较 PR 曲线、固定误报预算下的召回和校准误差，不能只看阈值 0.01 下的召回。
 
-安装本仓库（可编辑安装）和 pytest。首次运行 `yolo11n.pt` 会下载预训练权重。两组使用同一权重、种子、数据、分辨率、训练轮数及增强设置：
+训练验证 `max_det` 默认 1000；该诊断入口不截断候选，且采用 top-class 候选、简化 ignore 区域规则，不是官方 AP，不能与训练验证指标直接横比。正式检测结论需要官方 VisDrone 协议。暂未实现全量 GPU 候选导出、正式分层 AP 或自动阈值搜索。
 
-```bash
-python examples/VisDrone-Occlusion/train_visdrone.py --data /data/VisDrone_occ_split/dataset.yaml --model yolo11n.pt --epochs 100 --imgsz 640 --device 0 --name baseline
-python examples/VisDrone-Occlusion/train_visdrone.py --data /data/VisDrone_occ_split/dataset.yaml --model yolo11n.pt --epochs 100 --imgsz 640 --device 0 --weighted --size-weight 1 --occ-weight 1 --name size_occ
+## 已验证的范围
+
+官方验证集取独立的 8 张训练、4 张校准、4 张验证图像，训练 704 GT、校准 273 GT、验证 309 GT。该子集只用于工程检查；验证集用于 checkpoint 选择，不能称为未经使用的最终测试集。
+
+本轮相同预训练、种子 42、320 输入、三轮训练完成 baseline 与渐进加权两组，权重诊断记录：预热 r=0 时平均权重 1，r=0.5 时约 1.24，r=1 时约 1.48。模型、训练日志和校准报告均能保存。两组标准验证 AP 仍为 0，不能证明加权有效。新模型在 0.01 阈值下原始 TP0/FP0，Platt 后 TP0/FP109，验证侧 ECE/Brier 变差。旧十轮弱模型的温度/Platt 对照同样没有改善误报；不能称为误检抑制成功。
+
+```powershell
+python -m pip install pytest
+python -m pytest tests/test_occlusion.py tests/test_occlusion_training.py tests/test_occlusion_cli.py tests/test_occlusion_calibration.py -q
 ```
 
-CPU 用 `--device cpu`。默认输出在仓库 `runs/visdrone_occ/` 下；环境变量 `OCC_EXPERIMENT_ROOT` 可指定实验输出根目录。相同运行名若已有结果，Ultralytics 会生成新目录；以输出日志中的实际 save_dir 为准。
-
-对 GT：`w = clip(1 + α × 32/(sqrt(area)+32) + β × occ/2, 1, 3)`。area 是 letterbox 后输入图上的像素面积。通过 TaskAlignedAssigner 的 GT 索引把权重映射到正样本 anchor，并按正样本 anchor 平均值归一化。权重应用到正类别 BCE 项、框回归和 DFL，负类别 BCE 保持原始权重，避免整体抬高全部背景损失。这里“动态”指依赖样本大小/遮挡的权重，不是已经实现的学习式控制器。
-
-分别设置 `--size-weight 1 --occ-weight 0`、`--size-weight 0 --occ-weight 1` 做单因素消融；两者为零时已测试与原始损失一致。运行配置保存到 `occlusion_config.json`，环境变量是当前 trainer 的参数传递方式；恢复训练应显式使用同样权重设置，当前脚本不支持自动 resume。
-
-为确保遮挡信息和 GT 对应，当前两组都只用 letterbox，关闭 Mosaic、裁剪、混合和翻转增强。训练 args.yaml 中通用增强参数仍可能显示默认值，但实际 dataset 覆盖了 transforms，`occlusion_config.json` 记录真实设置。正式增加增强时必须同步过滤/重排元数据，并考虑增强改变可见性的问题。
-
-## NMS 诊断与校准
-
-```bash
-python examples/VisDrone-Occlusion/evaluate_occlusion.py --weights runs/visdrone_occ/runs/size_occ/weights/best.pt --data /data/VisDrone_occ_split --eval-split test --imgsz 640 --output /data/results/size_occ
-```
-
-输出 report.json、原始候选缓存 candidate_cache.pt、抑制轨迹 suppression_traces.json。遮挡 0/1/2 分层；原图面积小于 32² 为小目标诊断组。评估固定 score threshold 前后的候选覆盖、NMS 删除及一对一召回；不使用 max_det 截断，避免混入 NMS 损失。诊断采用 top-class candidate，与 Ultralytics 某些多标签验证设置不同，不能与标准 AP 直接比较。
-
-校准只在 `cal` 图像中对 NMS 后的候选拟合正标量温度；不读取真实遮挡标签来修正推理分数。标签由同类、IoU≥匹配阈值的一对一匹配产生。正例或负例缺失时返回 `not_fitted_degenerate_labels`，不会伪造成功校准。
-
-标量温度保持排序，因此不改变已发生的 NMS 删除；改变固定分数阈值下的取舍。校准不是误检减少保证。这里校准是后处理模块，而非端到端新网络；当前尚未实现分组正交注意力，避免同时改网络与损失而混淆归因。report 的 ECE/Brier 是候选池条件下的二分类校准诊断，不是涵盖漏检的检测校准全指标。
-
-忽略区域只采用“未匹配预测与 ignore 区域 IoA>0.5 时排除”的原型规则。正式 VisDrone 结论需采用官方协议。与模型选择共用的验证结果不是未经使用的测试结果；请使用 `--eval-split test` 做最终报告。
-
-## 已完成的流程验证
-
-从官方验证集取独立的 8 张训练、4 张校准、4 张评估图像，原始遮挡信息保留；训练侧 704 个目标，校准 273 个，评估 309 个。该划分仅用于工程流程验证。
-
-已完成原始/加权训练，随后使用相同预训练初始化、10 轮、320 输入重新跑两组。独立校准集的加权模型获得有效正负样本并完成温度拟合。检测质量仍很低；标准验证 AP 为零，不能据此支持论文的性能或 NMS 主要致因结论。小子集的校准拟合结果不能证明泛化。在默认诊断报告阈值 0.01 下，加权组温度校准后仅得到 TP=17、FP=4394（GT=309），评估侧 ECE/Brier 也未改善；不能把这一结果称为误检抑制有效。
-
-```bash
-pytest tests/test_occlusion.py -q
-```
-
-测试覆盖标准/扩展元数据对齐、哈希拒绝、零权重等价、空目标、梯度、抑制轨迹及温度拟合。真实实验还需完整数据、训练预算、多种子、官方评估、置信区间、阈值敏感性和进一步抑制方法对照。
+测试覆盖元数据对齐和哈希、零权重等价、空目标与梯度、难例权重不抵消、预热进度、翻转对应、CLI 配置、校准退化情况与数据隔离。上述功能测试与选取的框架回归检查共 54 项通过。注意力模块、P2、NWD、蒸馏、遮挡预测辅助头与 NMS 替换尚未实现，后续应在上述四组对照完成后分别验证。

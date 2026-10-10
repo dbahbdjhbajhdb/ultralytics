@@ -5,13 +5,21 @@
 import hashlib
 import json
 from pathlib import Path
+
 import numpy as np
 import torch
+
+from ultralytics.data.augment import Compose, Format, LetterBox, RandomFlip, RandomHSV
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import img2label_paths
 
 
 class OcclusionDataset(YOLODataset):
+    def __init__(self, *args, safe_augment=False, **kwargs):
+        self.safe_augment = bool(safe_augment)
+        self.training_split = bool(kwargs.get("augment", False))
+        super().__init__(*args, **kwargs)
+
     def get_labels(self):
         labels = super().get_labels()
         for lb in labels:
@@ -51,9 +59,18 @@ class OcclusionDataset(YOLODataset):
         return labels
 
     def build_transforms(self, hyp=None):
-        # MVP preserves row identity. Mosaic/crops change visibility and require metadata-aware transforms.
-        self.augment = False
-        return super().build_transforms(hyp)
+        # HSV and flips preserve visibility, row order and object count; crops and mixes do not.
+        transforms = [LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=self.training_split)]
+        if self.training_split and self.safe_augment:
+            transforms.extend(
+                [
+                    RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+                    RandomFlip(p=hyp.fliplr, direction="horizontal"),
+                    RandomFlip(p=hyp.flipud, direction="vertical"),
+                ]
+            )
+        transforms.append(Format(bbox_format="xywh", normalize=True, batch_idx=True, bgr=0.0))
+        return Compose(transforms)
 
     def __getitem__(self, index):
         batch = super().__getitem__(index)
